@@ -7,7 +7,7 @@
 $fn = 48; // Resolución de las curvas tubulares (subir a 64 para exportar STL final)
 
 // --- PARÁMETROS FÍSICOS Y DELIMITADORES ---
-radio_alambre_mm = 0.5;       // Alambre de cobre de 1.0 mm de diámetro (0.5 mm radio)
+radio_alambre_mm = 2;       // Alambre de cobre de 1.0 mm de diámetro (0.5 mm radio)
 radio_cilindro_cm = 4.0;      // 4.0 cm de radio máximo del cilindro único
 altura_max_24_cm = 7.0;       // 7.0 cm de altura máxima para la rama de 2.44 GHz
 altura_max_55_cm = 3.5;       // 3.5 cm de altura máxima para la rama de 5.50 GHz
@@ -21,27 +21,32 @@ mostrar_ejes_guia = true;     // Muestra la cruz ortogonal de referencia en la b
 // =====================================================================
 nodos_24 = [
     [  0.000,   0.000,   0.000], // Paso 0
-    [  2.390,   0.399,   0.297], // Paso 1
-    [  3.405,   1.128,   0.447], // Paso 2
-    [  2.633,   0.681,   1.551], // Paso 3
-    [  1.645,  -2.606,   2.443], // Paso 4
-    [  1.787,  -2.980,   3.631], // Paso 5
-    [  0.029,  -2.103,   4.255], // Paso 6
-    [ -1.146,  -1.739,   4.854], // Paso 7
-    [ -3.457,   0.101,   6.079] // Paso 8
+    [  2.391,   0.053,   0.709], // Paso 1
+    [  2.468,  -2.726,   1.221], // Paso 2
+    [  2.178,  -2.809,   2.293], // Paso 3
+    [ -0.699,  -1.026,   3.515], // Paso 4
+    [ -1.054,  -0.689,   3.933], // Paso 5
+    [ -3.354,  -0.477,   4.742], // Paso 6
+    [ -2.786,   0.838,   6.022], // Paso 7
+    [ -1.215,   1.487,   7.000] // Paso 8
 ];
 
 nodos_55 = [
     [  0.000,   0.000,   0.000], // Paso 0
-    [  0.133,   1.021,   0.206], // Paso 1
-    [  0.678,   1.758,   0.809], // Paso 2
-    [  2.240,   1.054,   1.350], // Paso 3
-    [  2.724,  -0.324,   1.630], // Paso 4
-    [  3.426,  -0.960,   2.242], // Paso 5
-    [  3.456,  -0.382,   2.658], // Paso 6
-    [  1.959,   1.574,   3.324], // Paso 7
-    [ -0.775,   2.218,   3.500] // Paso 8
+    [ -0.133,   1.060,   0.466], // Paso 1
+    [ -0.707,   2.819,   0.821], // Paso 2
+    [ -2.388,   2.139,   1.103], // Paso 3
+    [ -2.487,   0.636,   1.253], // Paso 4
+    [ -3.041,  -0.120,   1.403], // Paso 5
+    [ -2.197,  -0.442,   2.103], // Paso 6
+    [ -1.535,  -0.049,   2.420], // Paso 7
+    [ -3.118,   1.535,   2.594] // Paso 8
 ];
+
+
+
+
+
 
 
 // =====================================================================
