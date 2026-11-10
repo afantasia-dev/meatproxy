@@ -3,18 +3,15 @@ import random
 import math
 
 # =====================================================================
-# CARGA DE PYSPICE PARA VERIFICACIÓN Y GENERACIÓN DE NETLIST SPICE
+# CARGA DE PYNEC (necpp) PARA VERIFICACIÓN ELECTROMAGNÉTICA MO-M
 # =====================================================================
-PYSPICE_DISPONIBLE = False
+PYNEC_DISPONIBLE = False
 try:
-    import PySpice.Logging.Logging as Logging
-    logger = Logging.setup_logging(logging_level='CRITICAL')
-    from PySpice.Spice.Netlist import Circuit
-    from PySpice.Unit import *
-    PYSPICE_DISPONIBLE = True
+    import necpp
+    PYNEC_DISPONIBLE = True
 except ImportError:
-    print("Aviso: Librería PySpice no detectada. Se generará el Netlist SPICE")
-    print("estándar de texto y se verificará con el solucionador nodal MNA.")
+    print("Aviso: Librería 'necpp' (PyNEC) no detectada (pip install necpp).")
+    print("El archivo .nec igualmente se generará y guardará al finalizar.")
 
 # =====================================================================
 # 1. PARÁMETROS GEOMÉTRICOS, ELÉCTRICOS Y DEL ALGORITMO GENÉTICO
@@ -42,9 +39,6 @@ EPS_0 = 8.854187817e-12
 MU_0 = 4.0 * math.pi * 1e-7
 RHO_COBRE = 1.68e-8       # Resistividad del cobre (Ohm*m)
 SIGMA_COBRE = 5.80e7      # Conductividad del cobre para tarjeta LD de NEC2 (S/m)
-
-# Variable de estado para el motor C de Ngspice
-NGSPICE_C_ACTIVO = PYSPICE_DISPONIBLE
 
 # =====================================================================
 # 2. REPRESENTACIÓN GENÉTICA Y CODIFICACIÓN PROGRESIVA
@@ -87,7 +81,6 @@ def decodificar_cruz_a_cartesianas(individuo):
         
         for idx, (r, d_theta, d_z) in enumerate(genes):
             if idx == 0:
-                # Salida limpia desde la soldadura común para separar paredes físicas
                 r_clip = float(np.clip(r, RADIO_ALAMBRE * 3.0, RADIO_MAX))
                 theta_actual = theta_inicial + d_theta * 0.15
             else:
@@ -111,10 +104,6 @@ def decodificar_cruz_a_cartesianas(individuo):
 # 3. MOTOR DE COLISIONES FÍSICAS REALES (CENTRO A CENTRO + PAREDES)
 # =====================================================================
 def motor_de_colisiones_3d(nodos_a, nodos_b, luz_libre_mm=SEPARACION_AIRE_MM):
-    """
-    Verifica que las superficies exteriores de ambos cables jamás se toquen.
-    Distancia mínima centro a centro = (2 * RADIO_ALAMBRE) + luz_libre.
-    """
     diametro_alambre_m = 2.0 * RADIO_ALAMBRE
     distancia_min_centros = diametro_alambre_m + (luz_libre_mm / 1000.0)
     
@@ -170,10 +159,9 @@ def evaluar_geometria_e_isotropia(nodos):
     return puntaje_isotropia, penalizacion_doblado
 
 # =====================================================================
-# 4. EXTRACCIÓN DE RED RLC Y VERIFICACIÓN EN PYSPICE
+# 4. MODELO ANALÍTICO RÁPIDO DE IMPEDANCIA DISTRIBUIDA
 # =====================================================================
 def extraer_red_rlc_rama(nodos, freq, factor_resonancia_dipolo, factor_escala_admitancia=1.0):
-    omega = 2.0 * math.pi * freq
     longitud_onda = C_LUZ / freq
     delta_skin = math.sqrt(RHO_COBRE / (math.pi * freq * MU_0))
     segmentos_escalados = []
@@ -219,116 +207,66 @@ def resolver_escalera_analitica(segmentos, r_term, x_term, freq):
         z_carga = z_serie + (1.0 / y_nodo)
     return z_carga
 
-def construir_y_verificar_pyspice(nodos_24, nodos_55, freq, nombre_banda):
-    global NGSPICE_C_ACTIVO
-    omega = 2.0 * math.pi * freq
-
-    vec_medio_24 = np.mean(nodos_24[1:, :2], axis=0)
-    vec_medio_55 = np.mean(nodos_55[1:, :2], axis=0)
-    norm_24 = float(np.linalg.norm(vec_medio_24)) + 1e-6
-    norm_55 = float(np.linalg.norm(vec_medio_55)) + 1e-6
-    cos_cruz = abs(float(np.dot(vec_medio_24 / norm_24, vec_medio_55 / norm_55)))
-    k_mutuo = 0.04 + 0.25 * cos_cruz
-
-    if abs(freq - FREQ_24) < 1e6:
-        seg_24, r_t24, x_t24 = extraer_red_rlc_rama(nodos_24, freq, 1.0, 1.0)
-        seg_55, r_t55, x_t55 = extraer_red_rlc_rama(nodos_55, freq, 0.85, k_mutuo)
-    else:
-        seg_24, r_t24, x_t24 = extraer_red_rlc_rama(nodos_24, freq, 0.85, k_mutuo)
-        seg_55, r_t55, x_t55 = extraer_red_rlc_rama(nodos_55, freq, 1.0, 1.0)
-
-    if PYSPICE_DISPONIBLE:
-        circuit = Circuit(f'Antena_Cruz_ESP32C5_{nombre_banda}')
-        circuit.SinusoidalVoltageSource('rf', 'n_fuente', circuit.gnd, ac_magnitude=1@u_V)
-        circuit.R('z0', 'n_fuente', 'n_in', Z0@u_Ohm)
-
-        def agregar_rama_spice(prefijo, segmentos, r_term, x_term):
-            nodo_prev = 'n_in'
-            for idx, (R_v, L_v, C_v) in enumerate(segmentos):
-                n_mid = f'n_{prefijo}_m{idx+1}'
-                n_out = f'n_{prefijo}_o{idx+1}'
-                circuit.R(f'{prefijo}_s{idx+1}', nodo_prev, n_mid, R_v@u_Ohm)
-                circuit.L(f'{prefijo}_s{idx+1}', n_mid, n_out, L_v@u_H)
-                circuit.C(f'{prefijo}_p{idx+1}', n_out, circuit.gnd, C_v@u_F)
-                nodo_prev = n_out
-            n_term = f'n_{prefijo}_term'
-            circuit.R(f'{prefijo}_rad', nodo_prev, n_term, r_term@u_Ohm)
-            if x_term >= 0:
-                circuit.L(f'{prefijo}_xrad', n_term, circuit.gnd, (max(x_term, 1e-6) / omega)@u_H)
-            else:
-                circuit.C(f'{prefijo}_xrad', n_term, circuit.gnd, (1.0 / (omega * max(abs(x_term), 1e-6)))@u_F)
-
-        agregar_rama_spice('R24', seg_24, r_t24, x_t24)
-        agregar_rama_spice('R55', seg_55, r_t55, x_t55)
-        netlist_str = str(circuit) + f"\n.ac lin 2 {freq*0.999:.6e} {freq*1.001:.6e}\n.end"
-
-        if NGSPICE_C_ACTIVO:
-            try:
-                simulator = circuit.simulator(temperature=25, nominal_temperature=25)
-                analysis = simulator.ac(
-                    start_frequency=(freq * 0.999)@u_Hz,
-                    stop_frequency=(freq * 1.001)@u_Hz,
-                    number_of_points=2,
-                    variation='lin'
-                )
-                v_in = complex(analysis['n_in'].as_ndarray()[0])
-                try:
-                    ngspice = simulator.factory(circuit).ngspice
-                    ngspice.remove_circuit()
-                    ngspice.destroy()
-                except Exception:
-                    pass
-                i_in = (1.0 - v_in) / Z0
-                z_in_spice = v_in / i_in
-                gamma = abs((z_in_spice - Z0) / (z_in_spice + Z0))
-                s11_spice = 20.0 * math.log10(max(gamma, 1e-5))
-                return z_in_spice, s11_spice, netlist_str
-            except Exception:
-                NGSPICE_C_ACTIVO = False
-    else:
-        lineas = [
-            f".title Antena_Cruz_ESP32C5_{nombre_banda}",
-            "Vrf n_fuente 0 DC 0V AC 1V",
-            f"Rz0 n_fuente n_in {Z0:.4f}"
-        ]
-        for prefijo, segmentos, r_term, x_term in [('R24', seg_24, r_t24, x_t24), ('R55', seg_55, r_t55, x_t55)]:
-            nodo_prev = 'n_in'
-            for idx, (R_v, L_v, C_v) in enumerate(segmentos):
-                n_mid = f"n_{prefijo}_m{idx+1}"
-                n_out = f"n_{prefijo}_o{idx+1}"
-                lineas.append(f"R_{prefijo}_s{idx+1} {nodo_prev} {n_mid} {R_v:.6e}")
-                lineas.append(f"L_{prefijo}_s{idx+1} {n_mid} {n_out} {L_v:.6e}")
-                lineas.append(f"C_{prefijo}_p{idx+1} {n_out} 0 {C_v:.6e}")
-                nodo_prev = n_out
-            n_term = f"n_{prefijo}_term"
-            lineas.append(f"R_{prefijo}_rad {nodo_prev} {n_term} {r_term:.6e}")
-            if x_term >= 0:
-                lineas.append(f"L_{prefijo}_xrad {n_term} 0 {(max(x_term, 1e-6) / omega):.6e}")
-            else:
-                lineas.append(f"C_{prefijo}_xrad {n_term} 0 {(1.0 / (omega * max(abs(x_term), 1e-6))):.6e}")
-        lineas.append(f".ac lin 2 {freq*0.999:.6e} {freq*1.001:.6e}")
-        lineas.append(".end")
-        netlist_str = "\n".join(lineas)
-
-    z1 = resolver_escalera_analitica(seg_24, r_t24, x_t24, freq)
-    z2 = resolver_escalera_analitica(seg_55, r_t55, x_t55, freq)
-    z_in_mna = 1.0 / ((1.0 / z1) + (1.0 / z2))
-    gamma = abs((z_in_mna - Z0) / (z_in_mna + Z0))
-    s11_mna = 20.0 * math.log10(max(gamma, 1e-5))
-    return z_in_mna, s11_mna, netlist_str
-
 # =====================================================================
-# 5. GENERADOR DE ARCHIVO NEC2 (.nec) DEL CAMPEÓN
+# 5. SIMULADOR PYNEC (necpp) EN VIVO + GENERADOR DE ARCHIVO .NEC
 # =====================================================================
+def simular_en_pynec(nodos_24_m, nodos_55_m, freq_hz):
+    """
+    Si la librería 'necpp' (PyNEC) está instalada, ejecuta el Método de los Momentos (MoM)
+    directamente en C/Python y devuelve (z_in_nec, s11_nec, gain_max_dbi, gain_min_dbi).
+    """
+    if not PYNEC_DISPONIBLE:
+        return None
+
+    nec = necpp.nec_create()
+    try:
+        z_bif = 0.0020
+        necpp.nec_wire(nec, 99, 1, 0.0, 0.0, 0.0, 0.0, 0.0, z_bif, RADIO_ALAMBRE, 1.0, 1.0)
+
+        n24 = np.copy(nodos_24_m)
+        n55 = np.copy(nodos_55_m)
+        n24[0] = [0.0, 0.0, z_bif]
+        n55[0] = [0.0, 0.0, z_bif]
+
+        for i in range(len(n24) - 1):
+            p1, p2 = n24[i], n24[i+1]
+            necpp.nec_wire(nec, i + 1, 5, float(p1[0]), float(p1[1]), float(p1[2]),
+                           float(p2[0]), float(p2[1]), float(p2[2]), RADIO_ALAMBRE, 1.0, 1.0)
+
+        for i in range(len(n55) - 1):
+            p1, p2 = n55[i], n55[i+1]
+            necpp.nec_wire(nec, i + 11, 5, float(p1[0]), float(p1[1]), float(p1[2]),
+                           float(p2[0]), float(p2[1]), float(p2[2]), RADIO_ALAMBRE, 1.0, 1.0)
+
+        necpp.nec_geometry_complete(nec, 0)
+        necpp.nec_ld_card(nec, 5, 0, 0, 0, SIGMA_COBRE, 0.0, 0.0)
+        necpp.nec_fr_card(nec, 0, 1, freq_hz / 1e6, 0.0)
+        necpp.nec_ex_card(nec, 0, 99, 1, 0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        necpp.nec_rp_card(nec, 0, 37, 73, 0, 5, 0, 0, 0.0, 0.0, 5.0, 5.0, 0.0, 0.0)
+
+        z_real = necpp.nec_impedance_real(nec, 0)
+        z_imag = necpp.nec_impedance_imag(nec, 0)
+        z_in_nec = complex(z_real, z_imag)
+
+        gamma = abs((z_in_nec - Z0) / (z_in_nec + Z0))
+        s11_nec = 20.0 * math.log10(max(gamma, 1e-5))
+
+        gain_max = necpp.nec_gain_max(nec, 0)
+        gain_min = necpp.nec_gain_min(nec, 0)
+
+        necpp.nec_delete(nec)
+        return z_in_nec, s11_nec, gain_max, gain_min
+    except Exception:
+        try:
+            necpp.nec_delete(nec)
+        except Exception:
+            pass
+        return None
+
 def generar_archivo_nec_campeon(nodos_24_m, nodos_55_m, filename="antena_cruz_esp32c5.nec"):
     """
-    Genera un archivo de entrada NEC2 estándar (en metros) para 4nec2, xnec2c o PyNEC.
-    Incluye:
-    - Pin alimentador común en la base (Tag 99) donde se inyecta la fuente EX.
-    - Los 8 segmentos de la Rama 2.44 GHz (Tags 1 al 8).
-    - Los 8 segmentos de la Rama 5.50 GHz (Tags 11 al 18).
-    - Pérdidas reales por conductividad del cobre (LD 5).
-    - Barrido de frecuencias y cálculo de patrón 3D completo (RP).
+    Genera un archivo de entrada NEC2 estándar (en metros) libre de errores de comentarios
+    intermedios, listo para 4nec2, xnec2c o PyNEC.
     """
     lineas_nec = [
         "CM ===================================================================",
@@ -339,17 +277,14 @@ def generar_archivo_nec_campeon(nodos_24_m, nodos_55_m, filename="antena_cruz_es
         "CE"
     ]
 
-    # Punto de bifurcación a 2 mm sobre el origen para alimentar ambas ramas en paralelo sin error de unión NEC
     z_bif = 0.0020
     lineas_nec.append(f"GW 99 1  0.000000  0.000000  0.000000  0.000000  0.000000 {z_bif:9.6f} {RADIO_ALAMBRE:8.5f}")
 
-    # Copiar coordenadas ajustando el nodo 0 al punto de bifurcación común (0, 0, z_bif)
     n24 = np.copy(nodos_24_m)
     n55 = np.copy(nodos_55_m)
     n24[0] = [0.0, 0.0, z_bif]
     n55[0] = [0.0, 0.0, z_bif]
 
-    # Tarjetas GW para Rama 1 (2.44 GHz) -> Tags 1 a 8 (5 subdivisiones MoM por tramo)
     for i in range(len(n24) - 1):
         p1, p2 = n24[i], n24[i+1]
         tag = i + 1
@@ -358,7 +293,6 @@ def generar_archivo_nec_campeon(nodos_24_m, nodos_55_m, filename="antena_cruz_es
             f"{p2[0]:9.6f} {p2[1]:9.6f} {p2[2]:9.6f} {RADIO_ALAMBRE:8.5f}"
         )
 
-    # Tarjetas GW para Rama 2 (5.50 GHz) -> Tags 11 a 18 (5 subdivisiones MoM por tramo)
     for i in range(len(n55) - 1):
         p1, p2 = n55[i], n55[i+1]
         tag = i + 11
@@ -367,15 +301,13 @@ def generar_archivo_nec_campeon(nodos_24_m, nodos_55_m, filename="antena_cruz_es
             f"{p2[0]:9.6f} {p2[1]:9.6f} {p2[2]:9.6f} {RADIO_ALAMBRE:8.5f}"
         )
 
-    # Fin de la geometría en espacio libre (GE 0)
+    # Tarjetas de control limpias (sin CM intermedios después de GE)
     lineas_nec.extend([
         "GE 0",
         f"LD 5 0 0 0 {SIGMA_COBRE:.2e}",
         "EX 0 99 1 0 1.0 0.0",
-        "CM --- Evaluacion en Banda Baja: 2440 MHz ---",
         f"FR 0 1 0 0 {FREQ_24/1e6:.2f} 0.0",
         "RP 0 37 73 1000 0.0 0.0 5.0 5.0",
-        "CM --- Evaluacion en Banda Alta: 5500 MHz ---",
         f"FR 0 1 0 0 {FREQ_55/1e6:.2f} 0.0",
         "RP 0 37 73 1000 0.0 0.0 5.0 5.0",
         "EN"
@@ -462,7 +394,7 @@ def mutar_individuo(individuo):
     return mutado
 
 # =====================================================================
-# 7. BUCLE EVOLUTIVO PRINCIPAL + EXPORTACIÓN SPICE, NEC2 Y OPENSCAD
+# 7. BUCLE EVOLUTIVO PRINCIPAL + EXPORTACIÓN PYNEC / NEC2 Y OPENSCAD
 # =====================================================================
 def ejecutar_optimizacion():
     random.seed(42)
@@ -471,7 +403,7 @@ def ejecutar_optimizacion():
     poblacion = [crear_individuo() for _ in range(TAMANO_POBLACION)]
 
     print("=" * 94)
-    print(" OPTIMIZACIÓN EVOLUTIVA + PYSPICE + EXPORTACIÓN NEC2 + ANTI-COLISIÓN (ESP32-C5)")
+    print(" OPTIMIZACIÓN EVOLUTIVA + PYNEC (necpp) + ANTI-COLISIÓN (ESP32-C5: 2.44 & 5.50 GHz)")
     print(f" Cilindro Único: R={RADIO_MAX*100:.1f} cm | H_2.44={ALTURA_MAX_24*100:.1f} cm | H_5.50={ALTURA_MAX_55*100:.1f} cm")
     print(f" Alambre: Radio={RADIO_ALAMBRE*1000:.1f} mm (Diámetro={RADIO_ALAMBRE*2000:.1f} mm) | Aire libre mín={SEPARACION_AIRE_MM:.1f} mm")
     print(f" Población: {TAMANO_POBLACION} | Generaciones: {GENERACIONES} | Élite intacta: {ELITE_SIZE}")
@@ -487,12 +419,17 @@ def ejecutar_optimizacion():
 
         if gen % 32 == 0 or gen == GENERACIONES - 1:
             bfit, bs24, bs55, bz24, bz55, bomni, baire, mejor_gen_ind = evaluados[0]
-            n24_g, n55_g = decodificar_cruz_a_cartesianas(mejor_gen_ind)
-            _, s11_sp24, _ = construir_y_verificar_pyspice(n24_g, n55_g, FREQ_24, "2440MHz")
-            _, s11_sp55, _ = construir_y_verificar_pyspice(n24_g, n55_g, FREQ_55, "5500MHz")
+            info_nec = ""
+            if PYNEC_DISPONIBLE:
+                n24_g, n55_g = decodificar_cruz_a_cartesianas(mejor_gen_ind)
+                res_nec24 = simular_en_pynec(n24_g, n55_g, FREQ_24)
+                if res_nec24 is not None:
+                    _, _, gmax24, gmin24 = res_nec24
+                    info_nec = f" | NEC_2.4G: [{gmin24:5.1f}, {gmax24:4.1f}] dBi"
+
             print(f"Gen {gen:4d}/{GENERACIONES} | Fit: {bfit:7.2f} | "
-                  f"S11_Spice(2.4G): {s11_sp24:6.2f} dB | S11_Spice(5.5G): {s11_sp55:6.2f} dB | "
-                  f"Aire: {baire:4.2f} mm")
+                  f"S11(2.44G): {bs24:6.2f} dB | S11(5.50G): {bs55:6.2f} dB | "
+                  f"Aire: {baire:4.2f} mm{info_nec}")
 
         mejores_elite = [copiar_individuo(item[7]) for item in evaluados[:ELITE_SIZE]]
         nueva_poblacion = [copiar_individuo(elite) for elite in mejores_elite]
@@ -505,14 +442,10 @@ def ejecutar_optimizacion():
 
         poblacion = nueva_poblacion
 
-    # Extraer el campeón final y verificar con PySpice
+    # Extraer el campeón final
     mejor_fit, mejor_s24, mejor_s55, mejor_z24, mejor_z55, mejor_omni, mejor_aire, campeon = evaluados[0]
     nodos_24_m, nodos_55_m = decodificar_cruz_a_cartesianas(campeon)
 
-    z_sp24, s11_sp24, netlist_24 = construir_y_verificar_pyspice(nodos_24_m, nodos_55_m, FREQ_24, "2440MHz")
-    z_sp55, s11_sp55, netlist_55 = construir_y_verificar_pyspice(nodos_24_m, nodos_55_m, FREQ_55, "5500MHz")
-
-    # Generar archivo NEC2 únicamente para el campeón final
     nombre_archivo_nec = "antena_cruz_esp32c5.nec"
     contenido_nec = generar_archivo_nec_campeon(nodos_24_m, nodos_55_m, filename=nombre_archivo_nec)
 
@@ -523,20 +456,24 @@ def ejecutar_optimizacion():
     len_55_cm = sum(np.linalg.norm(nodos_55_cm[i+1] - nodos_55_cm[i]) for i in range(NUM_SEGMENTOS))
 
     print("\n" + "=" * 94)
-    print(" ¡OPTIMIZACIÓN, VERIFICACIÓN SPICE Y ARCHIVO NEC2 COMPLETADOS!")
-    print(f" * Verificación PySpice @ 2.44 GHz : S11 = {s11_sp24:6.2f} dB (Z_in = {z_sp24.real:5.2f} {z_sp24.imag:+6.2f}j Ohm)")
-    print(f" * Verificación PySpice @ 5.50 GHz : S11 = {s11_sp55:6.2f} dB (Z_in = {z_sp55.real:5.2f} {z_sp55.imag:+6.2f}j Ohm)")
-    print(f" * Separación libre entre paredes  : {mejor_aire:.2f} mm (Cero contacto físico fuera de la base)")
-    print(f" * Puntaje Omnidireccional 3D      : +{mejor_omni:5.2f} pts")
-    print(f" * Longitud física alambre         : Rama 2.44G = {len_24_cm:.2f} cm | Rama 5.50G = {len_55_cm:.2f} cm")
-    print(f" * Archivo NEC2 guardado en disco  : {nombre_archivo_nec}")
+    print(" ¡OPTIMIZACIÓN Y EXPORTACIÓN NEC2 COMPLETADAS SIN COLISIONES!")
+    print(f" * S11 Analítico @ 2.44 GHz       : {mejor_s24:6.2f} dB (Z_in = {mejor_z24.real:5.2f} {mejor_z24.imag:+6.2f}j Ohm)")
+    print(f" * S11 Analítico @ 5.50 GHz       : {mejor_s55:6.2f} dB (Z_in = {mejor_z55.real:5.2f} {mejor_z55.imag:+6.2f}j Ohm)")
+
+    if PYNEC_DISPONIBLE:
+        nec24 = simular_en_pynec(nodos_24_m, nodos_55_m, FREQ_24)
+        nec55 = simular_en_pynec(nodos_24_m, nodos_55_m, FREQ_55)
+        if nec24 and nec55:
+            z_n24, s11_n24, gmax_24, gmin_24 = nec24
+            z_n55, s11_n55, gmax_55, gmin_55 = nec55
+            print(f" * Verificación PyNEC @ 2.44 GHz  : Ganancia = [{gmin_24:5.2f} a {gmax_24:+5.2f}] dBi | Z_nec = {z_n24.real:5.1f} {z_n24.imag:+5.1f}j Ohm")
+            print(f" * Verificación PyNEC @ 5.50 GHz  : Ganancia = [{gmin_55:5.2f} a {gmax_55:+5.2f}] dBi | Z_nec = {z_n55.real:5.1f} {z_n55.imag:+5.1f}j Ohm")
+
+    print(f" * Separación libre entre paredes : {mejor_aire:.2f} mm (Cero contacto físico fuera de la base)")
+    print(f" * Puntaje Omnidireccional 3D     : +{mejor_omni:5.2f} pts")
+    print(f" * Longitud física alambre        : Rama 2.44G = {len_24_cm:.2f} cm | Rama 5.50G = {len_55_cm:.2f} cm")
+    print(f" * Archivo NEC2 guardado en disco : {nombre_archivo_nec}")
     print("=" * 94)
-
-    print("\n* --- ÚLTIMO MODELO SPICE GENERADO (NETLIST 2.44 GHz) ---")
-    print(netlist_24)
-
-    print("\n* --- ÚLTIMO MODELO SPICE GENERADO (NETLIST 5.50 GHz) ---")
-    print(netlist_55)
 
     print(f"\n* --- ARCHIVO NEC2 DEL CAMPEÓN ({nombre_archivo_nec}) ---")
     print(contenido_nec)
