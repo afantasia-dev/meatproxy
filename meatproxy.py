@@ -12,31 +12,30 @@ try:
 except ImportError:
     print("Aviso: Librería 'necpp' (PyNEC) no detectada.")
 
-# Si está en False, evoluciona a máxima velocidad sin riesgo de segfault en C++
-# y verifica con PyNEC (necpp) en cada reporte de generación y al final.
 USAR_PYNEC_EN_BUCLE = False
 
 # =====================================================================
-# 1. PARÁMETROS GEOMÉTRICOS Y ELÉCTRICOS (PATRÓN LISO Y REDONDO)
+# 1. PARÁMETROS GEOMÉTRICOS Y ELÉCTRICOS (100% ENFOCADO EN 5.50 GHz)
 # =====================================================================
 RADIO_MAX = 0.040         # 4.0 cm de radio máximo del cilindro (0.04 m)
 ALTURA_MAX = 0.070        # 7.0 cm de altura máxima del cilindro (0.07 m)
 
-LONGITUD_MIN_M = 0.085    # 8.5 cm longitud mínima estirada
-LONGITUD_MAX_M = 0.135    # 13.5 cm (Permite el modo armónico de ~12.88 cm sin multa)
+# Para 5.50 GHz (lambda = 5.45 cm), permitimos desde ~1.25 lambda (6.8 cm) hasta ~2.5 lambda (13.6 cm)
+LONGITUD_MIN_M = 0.068    # 6.8 cm longitud mínima estirada
+LONGITUD_MAX_M = 0.136    # 13.6 cm longitud máxima estirada
 
 RADIO_ALAMBRE = 0.0020    # Radio 2.0 mm (Alambre grueso de 4.0 mm de diámetro)
 SEPARACION_AIRE_MM = 2.5  # Espacio libre mínimo contra auto-intersección (mm)
 NUM_SEGMENTOS = 10        # 10 pasos 3D progresivos
 
-FREQ_24 = 2.44e9          # Banda baja Wi-Fi 6 (2.44 GHz)
-FREQ_55 = 5.50e9          # Banda alta Wi-Fi 6 (5.50 GHz)
+FREQ_55 = 5.50e9          # ÚNICA BANDA OBJETIVO DE OPTIMIZACIÓN (5.50 GHz)
+FREQ_24_INFO = 2.44e9     # Solo para referencia en el archivo .nec final (ignorada en el algoritmo)
 Z0 = 50.0                 # Impedancia puerto RF ESP32-C5 (50 Ohm)
 
 TAMANO_POBLACION = 256 if (PYNEC_DISPONIBLE and USAR_PYNEC_EN_BUCLE) else 1024
 GENERACIONES = 512 if (PYNEC_DISPONIBLE and USAR_PYNEC_EN_BUCLE) else 1024
-ELITE_SIZE = max(16, TAMANO_POBLACION // 8)
-TASA_MUTACION = 0.25
+ELITE_SIZE = 32           # Élite compacta para evitar estancamiento por clones
+TASA_MUTACION = 0.45      # Alta variación genética (45%)
 
 # Constantes físicas
 C_LUZ = 299792458.0
@@ -49,17 +48,12 @@ SIGMA_COBRE = 5.80e7      # Conductividad del cobre para tarjeta LD de NEC2 (S/m
 # 2. CODIFICACIÓN DE HÉLICE PROGRESIVA (EVITA PATRONES ABOLLADOS)
 # =====================================================================
 def crear_individuo():
-    """
-    Cada gen codifica [r, delta_theta, delta_z].
-    Restringimos delta_theta a valores positivos [0.35, 1.15] rad (~20° a 66° por paso)
-    para que el alambre forme una espiral continua y suave sin zigzags destructivos.
-    """
     genes = []
     dz_medio = ALTURA_MAX / NUM_SEGMENTOS
     for _ in range(NUM_SEGMENTOS):
-        r = random.uniform(0.010, RADIO_MAX)
-        d_theta = random.uniform(0.35, 1.15)
-        d_z = random.uniform(dz_medio * 0.6, dz_medio * 1.35)
+        r = random.uniform(0.008, RADIO_MAX)
+        d_theta = random.uniform(0.25, 1.35)
+        d_z = random.uniform(dz_medio * 0.5, dz_medio * 1.45)
         genes.append([r, d_theta, d_z])
     return np.array(genes, dtype=float)
 
@@ -68,8 +62,7 @@ def copiar_individuo(ind):
 
 def decodificar_alambre_a_cartesianas(genes):
     """
-    Convierte los genes en coordenadas 3D (X, Y, Z) partiendo de (0,0,0)[cite: 1].
-    Garantiza una distancia mínima por paso para no violar las reglas de NEC2.
+    Convierte los genes en coordenadas 3D (X, Y, Z) partiendo del origen (0,0,0)[cite: 1].
     """
     nodos = [[0.0, 0.0, 0.0]]
     suma_dz = sum(max(g[2], 0.0025) for g in genes)
@@ -81,7 +74,8 @@ def decodificar_alambre_a_cartesianas(genes):
 
     for idx, (r, d_theta, d_z) in enumerate(genes):
         r_target = float(np.clip(r, RADIO_ALAMBRE * 3.0, RADIO_MAX))
-        r_clip = 0.35 * r_prev + 0.65 * r_target
+        # Respuesta radial ágil (85%) para permitir explorar geometrías con mayor libertad
+        r_clip = 0.15 * r_prev + 0.85 * r_target
         r_prev = r_clip
 
         theta_actual += d_theta
@@ -95,7 +89,7 @@ def decodificar_alambre_a_cartesianas(genes):
     return np.array(nodos, dtype=float)
 
 # =====================================================================
-# 3. AUTO-COLISIÓN Y MODELO DE RADIACIÓN SIN ABOLLADURAS (XY + Z)
+# 3. AUTO-COLISIÓN Y MODELO DE RADIACIÓN 3D EXCLUSIVO PARA 5.50 GHz
 # =====================================================================
 def motor_autocolision_alambre(nodos, luz_libre_mm=SEPARACION_AIRE_MM):
     diametro_m = 2.0 * RADIO_ALAMBRE
@@ -110,7 +104,6 @@ def motor_autocolision_alambre(nodos, luz_libre_mm=SEPARACION_AIRE_MM):
     min_dist_centros = 999.0
     penalizacion = 0.0
 
-    # Verificar que ningún segmento individual sea más corto que 2.5 veces el diámetro
     for i in range(len(nodos) - 1):
         l_tramo = float(np.linalg.norm(nodos[i+1] - nodos[i]))
         if l_tramo < diametro_m * 1.5:
@@ -132,7 +125,12 @@ def motor_autocolision_alambre(nodos, luz_libre_mm=SEPARACION_AIRE_MM):
 def cmath_exp_j(angulo):
     return complex(math.cos(angulo), math.sin(angulo))
 
-def evaluar_patron_3d_liso_xy_z(nodos):
+def evaluar_patron_3d_55ghz(nodos):
+    """
+    Evalúa el patrón 3D exclusivamente en 5.50 GHz (ignorando 2.44 GHz):
+    - Muestrea 3 anillos en el hemisferio +Z (theta = 30°, 60°, 90°) + el eje +Z puro (0°).
+    - Minimiza el rizado X-Y (abolladuras) y el spread 3D global en 5.50 GHz.
+    """
     vectores = []
     longitudes = []
     centros = []
@@ -159,17 +157,20 @@ def evaluar_patron_3d_liso_xy_z(nodos):
     elif longitud_total > LONGITUD_MAX_M:
         penalizacion_geom += (longitud_total - LONGITUD_MAX_M) * 1500.0
 
+    # Suavidad entre segmentos para evitar lóbulos rotos a 5.50 GHz
     for i in range(len(vectores) - 1):
         cos_ang = float(np.dot(vectores[i], vectores[i+1]))
-        if cos_ang < 0.35:
-            penalizacion_geom += (0.35 - cos_ang) * 35.0
+        if cos_ang < 0.25:
+            penalizacion_geom += (0.25 - cos_ang) * 30.0
 
+    # Centrado de masa en X-Y para simetría azimutal
     centro_masa_xy = np.mean(nodos[1:, :2], axis=0)
-    penalizacion_geom += float(np.linalg.norm(centro_masa_xy)) * 600.0
+    penalizacion_geom += float(np.linalg.norm(centro_masa_xy)) * 550.0
 
-    def calcular_potencia_dir(theta, phi, freq):
-        k = (2.0 * math.pi * freq) / C_LUZ
-        k_eff = k * 0.88
+    k = (2.0 * math.pi * FREQ_55) / C_LUZ
+    k_eff = k * 0.88
+
+    def calcular_potencia_dir_55(theta, phi):
         r_hat = np.array([math.sin(theta)*math.cos(phi), math.sin(theta)*math.sin(phi), math.cos(theta)])
         e_vec = np.zeros(3, dtype=complex)
         for u_vec, l_s, c_pt, s_pos in zip(vectores, longitudes, centros, pos_acumulada):
@@ -180,33 +181,32 @@ def evaluar_patron_3d_liso_xy_z(nodos):
             e_vec += trans * l_s * i_mag * fase_espacial
         return float(np.sum(np.abs(e_vec) ** 2)) + 1e-9
 
-    spread_total = 0.0
-    rizado_xy_total = 0.0
-    deficit_z_total = 0.0
+    # Muestreo denso del domo +Z exclusivamente a 5.50 GHz:
+    # Anillo horizonte (90°), Anillo medio (60°), Anillo alto (30°) y Cúspide +Z (0°)
+    phis = np.linspace(0, 2.0 * math.pi, 12, endpoint=False)
+    p_xy_90 = [10.0 * math.log10(calcular_potencia_dir_55(math.pi * 0.50, phi)) for phi in phis]
+    p_xy_60 = [10.0 * math.log10(calcular_potencia_dir_55(math.pi * 0.33, phi)) for phi in phis]
+    p_xy_30 = [10.0 * math.log10(calcular_potencia_dir_55(math.pi * 0.16, phi)) for phi in phis]
+    p_z_top = 10.0 * math.log10(calcular_potencia_dir_55(0.0, 0.0))
 
-    for freq in (FREQ_24, FREQ_55):
-        p_xy_90 = [10.0 * math.log10(calcular_potencia_dir(math.pi * 0.50, phi, freq))
-                   for phi in np.linspace(0, 2.0 * math.pi, 12, endpoint=False)]
-        p_xy_60 = [10.0 * math.log10(calcular_potencia_dir(math.pi * 0.33, phi, freq))
-                   for phi in np.linspace(0, 2.0 * math.pi, 12, endpoint=False)]
-        p_z_top = 10.0 * math.log10(calcular_potencia_dir(0.0, 0.0, freq))
+    # Rizado azimutal X-Y (qué tan circular y libre de abolladuras es la dona de 5.5 GHz)
+    ripple_90 = (max(p_xy_90) - min(p_xy_90)) + 2.0 * float(np.std(p_xy_90))
+    ripple_60 = (max(p_xy_60) - min(p_xy_60)) + 2.0 * float(np.std(p_xy_60))
+    ripple_30 = (max(p_xy_30) - min(p_xy_30)) + 2.0 * float(np.std(p_xy_30))
+    rizado_xy_55 = (ripple_90 + ripple_60 + ripple_30) / 3.0
 
-        ripple_90 = (max(p_xy_90) - min(p_xy_90)) + 2.0 * float(np.std(p_xy_90))
-        ripple_60 = (max(p_xy_60) - min(p_xy_60)) + 2.0 * float(np.std(p_xy_60))
-        rizado_xy_total += 0.5 * (ripple_90 + ripple_60)
+    # Variación global 3D en todo el hemisferio +Z (XY + Z)
+    todos_pts = p_xy_90 + p_xy_60 + p_xy_30 + [p_z_top]
+    spread_3d_55 = max(todos_pts) - min(todos_pts)
 
-        todos_pts = p_xy_90 + p_xy_60 + [p_z_top]
-        spread_banda = max(todos_pts) - min(todos_pts)
-        spread_total += 0.5 * spread_banda
+    # Equilibrio entre ganancia en +Z y ganancia en el horizonte X-Y
+    media_xy = float(np.mean(p_xy_90))
+    deficit_z_55 = abs(p_z_top - media_xy) * 1.8
 
-        media_xy = float(np.mean(p_xy_90))
-        diferencia_z_xy = abs(p_z_top - media_xy)
-        deficit_z_total += diferencia_z_xy * 1.8
-
-    return spread_total, rizado_xy_total, deficit_z_total, penalizacion_geom, longitud_total
+    return spread_3d_55, rizado_xy_55, deficit_z_55, penalizacion_geom, longitud_total
 
 # =====================================================================
-# 4. MODELO DE IMPEDANCIA MULTIBANDA (UN SOLO ALAMBRE)
+# 4. MODELO DE IMPEDANCIA (UN SOLO ALAMBRE)
 # =====================================================================
 def calcular_z_in_un_alambre(nodos, freq):
     omega = 2.0 * math.pi * freq
@@ -255,10 +255,6 @@ def calcular_z_in_un_alambre(nodos, freq):
 # 5. SIMULADOR PYNEC (necpp) BLINDADO CONTRA SEGFAULT + EXPORTADOR .NEC
 # =====================================================================
 def calcular_subsegmentos_seguros(l_tramo):
-    """
-    Evita el Segmentation Fault en C++ (necpp) asegurando que cada sub-segmento
-    sea siempre más largo que 2.2 veces el radio del alambre (4.4 mm).
-    """
     longitud_min_subseg = RADIO_ALAMBRE * 2.2
     n_max = int(l_tramo // longitud_min_subseg)
     return max(1, min(5, n_max))
@@ -267,7 +263,6 @@ def simular_un_alambre_pynec(nodos_m, freq_hz):
     if not PYNEC_DISPONIBLE:
         return None
 
-    # Validación previa en Python antes de invocar punteros en C++
     for i in range(len(nodos_m) - 1):
         l_tramo = float(np.linalg.norm(nodos_m[i+1] - nodos_m[i]))
         if l_tramo < RADIO_ALAMBRE * 2.1:
@@ -311,10 +306,10 @@ def simular_un_alambre_pynec(nodos_m, freq_hz):
             pass
         return None
 
-def generar_archivo_nec_campeon(nodos_m, filename="antena_monorrama_lisa_esp32c5.nec"):
+def generar_archivo_nec_campeon(nodos_m, filename="antena_55ghz_pura_esp32c5.nec"):
     lineas_nec = [
         "CM ===================================================================",
-        "CM ANTENA MONORRAMA ESFERICA LISA (XY + Z) (ESP32-C5: 2.44 & 5.50 GHz)",
+        "CM ANTENA MONORRAMA OPTIMIZADA 100% PARA 5.50 GHz (ESP32-C5)",
         f"CM Cilindro: R={RADIO_MAX*100:.1f} cm | H={ALTURA_MAX*100:.1f} cm | Alambre D={RADIO_ALAMBRE*2000:.1f} mm",
         "CM Unidades NEC: Metros (m)",
         "CE"
@@ -334,9 +329,9 @@ def generar_archivo_nec_campeon(nodos_m, filename="antena_monorrama_lisa_esp32c5
         "GE 0",
         f"LD 5 0 0 0 {SIGMA_COBRE:.2e}",
         "EX 0 1 1 0 1.0 0.0",
-        f"FR 0 1 0 0 {FREQ_24/1e6:.2f} 0.0",
-        "RP 0 37 73 1000 0.0 0.0 5.0 5.0",
         f"FR 0 1 0 0 {FREQ_55/1e6:.2f} 0.0",
+        "RP 0 37 73 1000 0.0 0.0 5.0 5.0",
+        f"FR 0 1 0 0 {FREQ_24_INFO/1e6:.2f} 0.0",
         "RP 0 37 73 1000 0.0 0.0 5.0 5.0",
         "EN"
     ])
@@ -350,100 +345,102 @@ def generar_archivo_nec_campeon(nodos_m, filename="antena_monorrama_lisa_esp32c5
     return contenido
 
 # =====================================================================
-# 6. FUNCIÓN DE APTITUD (FITNESS: S11 + PATRÓN LISO EN X,Y + GANANCIA Z)
+# 6. FUNCIÓN DE APTITUD (100% ENFOCADA EN 5.50 GHz, IGNORA 2.44 GHz)
 # =====================================================================
 def evaluar_individuo(individuo):
     nodos = decodificar_alambre_a_cartesianas(individuo)
 
     pen_col, aire_mm = motor_autocolision_alambre(nodos, luz_libre_mm=SEPARACION_AIRE_MM)
-    spread_3d, ripple_xy, deficit_z, pen_geom, len_total_m = evaluar_patron_3d_liso_xy_z(nodos)
+    spread_3d_55, ripple_xy_55, deficit_z_55, pen_geom, len_total_m = evaluar_patron_3d_55ghz(nodos)
 
-    # Gatekeeper: Solo llamamos a PyNEC en el bucle si está activado Y si no hay colisión
     if PYNEC_DISPONIBLE and USAR_PYNEC_EN_BUCLE and pen_col == 0.0:
-        res24 = simular_un_alambre_pynec(nodos, FREQ_24)
         res55 = simular_un_alambre_pynec(nodos, FREQ_55)
     else:
-        res24, res55 = None, None
+        res55 = None
 
-    if res24 is not None and res55 is not None:
-        z_in_24, s11_24, gmax24, gmin24, delta_dbi_24, sd24 = res24
+    if res55 is not None:
         z_in_55, s11_55, gmax55, gmin55, delta_dbi_55, sd55 = res55
-        varianza_dbi = 0.5 * (delta_dbi_24 + delta_dbi_55) + 2.0 * (sd24 + sd55)
+        varianza_dbi_55 = delta_dbi_55 + 2.5 * sd55 + ripple_xy_55
     else:
-        z_in_24 = calcular_z_in_un_alambre(nodos, FREQ_24)
         z_in_55 = calcular_z_in_un_alambre(nodos, FREQ_55)
-        gamma_24 = abs((z_in_24 - Z0) / (z_in_24 + Z0))
         gamma_55 = abs((z_in_55 - Z0) / (z_in_55 + Z0))
-        s11_24 = 20.0 * math.log10(max(gamma_24, 1e-5))
         s11_55 = 20.0 * math.log10(max(gamma_55, 1e-5))
-        varianza_dbi = spread_3d + (ripple_xy * 1.5) + deficit_z
-
-    peor_s11 = max(s11_24, s11_55)
-    promedio_s11 = 0.5 * (s11_24 + s11_55)
+        varianza_dbi_55 = spread_3d_55 + (ripple_xy_55 * 1.8) + deficit_z_55
 
     penalizacion_s11 = 0.0
-    if s11_24 > -10.0: penalizacion_s11 += (s11_24 - (-10.0)) * 8.0
-    if s11_55 > -10.0: penalizacion_s11 += (s11_55 - (-10.0)) * 8.0
+    if s11_55 > -12.0:
+        penalizacion_s11 += (s11_55 - (-12.0)) * 12.0
 
-    fitness = (-peor_s11 * 2.0) + (-promedio_s11 * 0.8) - (varianza_dbi * 4.0) - penalizacion_s11 - pen_geom - pen_col
+    # El Fitness evalúa ÚNICAMENTE el desempeño en 5.50 GHz:
+    # Topamos el premio de S11 en -45 dB para que una vez alcanzado un excelente acoplamiento
+    # dedique todo el esfuerzo evolutivo a alisar la esfera (bajar varianza_dbi_55)
+    s11_efectivo = max(s11_55, -45.0)
+    fitness = (-s11_efectivo * 2.8) - (varianza_dbi_55 * 4.2) - penalizacion_s11 - pen_geom - pen_col
 
-    return fitness, s11_24, s11_55, z_in_24, z_in_55, spread_3d, ripple_xy, aire_mm, len_total_m
+    return fitness, s11_55, z_in_55, spread_3d_55, ripple_xy_55, aire_mm, len_total_m
 
 # =====================================================================
-# 7. OPERADORES GENÉTICOS Y BUCLE PRINCIPAL
+# 7. OPERADORES GENÉTICOS CON ALTA VARIACIÓN Y ANTI-ESTANCAMIENTO
 # =====================================================================
 def cruzar_individuos(padre1, padre2):
     hijo = crear_individuo()
     for i in range(NUM_SEGMENTOS):
-        hijo[i] = np.copy(padre1[i] if random.random() < 0.5 else padre2[i])
+        if random.random() < 0.5:
+            hijo[i] = np.copy(padre1[i])
+        else:
+            hijo[i] = np.copy(padre2[i])
     return hijo
 
 def mutar_individuo(individuo):
     mutado = copiar_individuo(individuo)
-    dz_max_paso = (ALTURA_MAX / NUM_SEGMENTOS) * 1.5
+    dz_max_paso = (ALTURA_MAX / NUM_SEGMENTOS) * 1.8
     for i in range(NUM_SEGMENTOS):
         if random.random() < TASA_MUTACION:
-            mutado[i, 0] = np.clip(mutado[i, 0] + random.gauss(0, 0.0025), RADIO_ALAMBRE * 3.0, RADIO_MAX)
-            mutado[i, 1] = np.clip(mutado[i, 1] + random.gauss(0, 0.15), 0.30, 1.25)
-            mutado[i, 2] = np.clip(mutado[i, 2] + random.gauss(0, 0.0015), 0.0035, dz_max_paso)
+            # 15% de probabilidad de hiper-mutación para saltar fuera de óptimos locales
+            escala = 3.0 if random.random() < 0.15 else 1.0
+            mutado[i, 0] = np.clip(mutado[i, 0] + random.gauss(0, 0.0055 * escala), RADIO_ALAMBRE * 3.0, RADIO_MAX)
+            mutado[i, 1] = np.clip(mutado[i, 1] + random.gauss(0, 0.30 * escala), -0.35, 1.65)
+            mutado[i, 2] = np.clip(mutado[i, 2] + random.gauss(0, 0.0035 * escala), 0.0035, dz_max_paso)
     return mutado
 
 def ejecutar_optimizacion():
-    random.seed(42)
-    np.random.seed(42)
-
     poblacion = [crear_individuo() for _ in range(TAMANO_POBLACION)]
 
     print("=" * 104)
-    print(" OPTIMIZACIÓN DE HÉLICE SUAVE MULTIFASE (BLINDADO CONTRA SEGFAULT EN PYNEC)")
+    print(" OPTIMIZACIÓN MONOBANDA EXCLUSIVA PARA 5.50 GHz (2.44 GHz IGNORADA EN EL ALGORITMO)")
     print(f" Cilindro: R={RADIO_MAX*100:.1f} cm | H={ALTURA_MAX*100:.1f} cm | Ventana Longitud: {LONGITUD_MIN_M*100:.1f} a {LONGITUD_MAX_M*100:.1f} cm")
-    print(f" PyNEC detectado: {PYNEC_DISPONIBLE} | Evaluación segura C++ en reportes y campeón final")
+    print(f" Variación aumentada: Mutación={TASA_MUTACION*100:.0f}% | Inmigración aleatoria=10% por generación")
     print("=" * 104)
 
     for gen in range(GENERACIONES):
         evaluados = []
         for ind in poblacion:
-            fit, s24, s55, z24, z55, sp3d, rip_xy, aire_mm, len_m = evaluar_individuo(ind)
-            evaluados.append((fit, s24, s55, z24, z55, sp3d, rip_xy, aire_mm, len_m, ind))
+            fit, s55, z55, sp3d, rip_xy, aire_mm, len_m = evaluar_individuo(ind)
+            evaluados.append((fit, s55, z55, sp3d, rip_xy, aire_mm, len_m, ind))
 
         evaluados.sort(key=lambda x: x[0], reverse=True)
 
         if gen % 32 == 0 or gen == GENERACIONES - 1:
-            bfit, bs24, bs55, bz24, bz55, bsp, brip, baire, blen, mejor_ind = evaluados[0]
+            bfit, bs55, bz55, bsp, brip, baire, blen, mejor_ind = evaluados[0]
             info_nec = ""
             if PYNEC_DISPONIBLE and baire > 1.0:
                 nodos_g = decodificar_alambre_a_cartesianas(mejor_ind)
-                res_nec = simular_un_alambre_pynec(nodos_g, FREQ_24)
-                if res_nec is not None:
-                    _, _, gmax24, gmin24, _, _ = res_nec
-                    info_nec = f" | NEC_2.4G:[{gmin24:4.1f},{gmax24:4.1f}]dBi"
+                res_nec55 = simular_un_alambre_pynec(nodos_g, FREQ_55)
+                if res_nec55 is not None:
+                    _, _, gmax55, gmin55, _, sd55 = res_nec55
+                    info_nec = f" | NEC_5.5G:[{gmin55:4.1f} a {gmax55:4.1f}]dBi (SD:{sd55:.2f})"
 
             print(f"Gen {gen:4d}/{GENERACIONES} | Fit: {bfit:7.2f} | "
-                  f"S11: {bs24:5.1f}/{bs55:5.1f} dB | "
+                  f"S11(5.5G): {bs55:5.1f} dB | "
                   f"Spread_3D: {bsp:4.2f} dB | Rizado_XY: {brip:4.2f} dB | L: {blen*100:5.2f} cm{info_nec}")
 
-        mejores_elite = [copiar_individuo(item[9]) for item in evaluados[:ELITE_SIZE]]
+        mejores_elite = [copiar_individuo(item[7]) for item in evaluados[:ELITE_SIZE]]
         nueva_poblacion = [copiar_individuo(elite) for elite in mejores_elite]
+
+        # Inyección de 10% de sangre nueva aleatoria para impedir estancamientos
+        num_inmigrantes = TAMANO_POBLACION // 10
+        for _ in range(num_inmigrantes):
+            nueva_poblacion.append(crear_individuo())
 
         while len(nueva_poblacion) < TAMANO_POBLACION:
             padre1, padre2 = random.sample(mejores_elite, 2)
@@ -452,25 +449,22 @@ def ejecutar_optimizacion():
 
         poblacion = nueva_poblacion
 
-    bfit, bs24, bs55, bz24, bz55, bsp, brip, baire, blen, campeon = evaluados[0]
+    bfit, bs55, bz55, bsp, brip, baire, blen, campeon = evaluados[0]
     nodos_m = decodificar_alambre_a_cartesianas(campeon)
     nodos_cm = nodos_m * 100.0
 
-    nombre_archivo_nec = "antena_monorrama_lisa_esp32c5.nec"
+    nombre_archivo_nec = "antena_55ghz_pura_esp32c5.nec"
     contenido_nec = generar_archivo_nec_campeon(nodos_m, filename=nombre_archivo_nec)
 
     print("\n" + "=" * 104)
-    print(" ¡ANTENA DE PATRÓN ESFÉRICO LISO (X, Y, +Z) COMPLETADA SIN ERRORES!")
-    print(f" * S11 @ 2.44 GHz                : {bs24:6.2f} dB (Z_in = {bz24.real:5.2f} {bz24.imag:+6.2f}j Ohm)")
-    print(f" * S11 @ 5.50 GHz                : {bs55:6.2f} dB (Z_in = {bz55.real:5.2f} {bz55.imag:+6.2f}j Ohm)")
+    print(" ¡ANTENA OPTIMIZADA 100% PARA 5.50 GHz COMPLETADA!")
+    print(f" * S11 @ 5.50 GHz (Objetivo)     : {bs55:6.2f} dB (Z_in = {bz55.real:5.2f} {bz55.imag:+6.2f}j Ohm)")
     if PYNEC_DISPONIBLE:
-        n24 = simular_un_alambre_pynec(nodos_m, FREQ_24)
         n55 = simular_un_alambre_pynec(nodos_m, FREQ_55)
-        if n24 and n55:
-            print(f" * PyNEC MoM @ 2.44 GHz          : Ganancia = [{n24[3]:5.2f} a {n24[2]:+5.2f}] dBi (SD={n24[5]:.2f} dB)")
+        if n55:
             print(f" * PyNEC MoM @ 5.50 GHz          : Ganancia = [{n55[3]:5.2f} a {n55[2]:+5.2f}] dBi (SD={n55[5]:.2f} dB)")
-    print(f" * Varianza Global 3D (XY + Z)   : {bsp:5.2f} dB")
-    print(f" * Rizado Azimutal en X-Y        : {brip:5.2f} dB (Menor = Dona más redonda y sin abolladuras)")
+    print(f" * Varianza Global 3D (5.50 GHz) : {bsp:5.2f} dB")
+    print(f" * Rizado Azimutal X-Y (5.50 GHz): {brip:5.2f} dB (Dona redonda sin abolladuras)")
     print(f" * Longitud total desplegada     : {blen*100:.2f} cm")
     print(f" * Aire libre auto-intersección  : {baire:.2f} mm")
     print(f" * Archivo NEC2 guardado         : {nombre_archivo_nec}")
@@ -479,7 +473,7 @@ def ejecutar_optimizacion():
     print(f"\n* --- ARCHIVO NEC2 DEL CAMPEÓN ({nombre_archivo_nec}) ---")
     print(contenido_nec)
 
-    print("\n// --- COPIAR Y PEGAR EN OPENSCAD (UN SOLO ALAMBRE LISO) ---")
+    print("\n// --- COPIAR Y PEGAR EN OPENSCAD (UN SOLO ALAMBRE 5.50 GHz) ---")
     print(f"radio_alambre_mm = {RADIO_ALAMBRE * 1000.0:.2f};")
     print("nodos_alambre = [")
     for idx, pt in enumerate(nodos_cm):
