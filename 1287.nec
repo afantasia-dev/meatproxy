@@ -1,0 +1,15 @@
+CM ===================================================================
+CM REFERENCIA: ALAMBRE RECTO VERTICAL DE 12.87 cm (ESP32-C5: 2.44 & 5.50 GHz)
+CM Longitud Total: 12.87 cm (0.1287 m) sobre el eje Z
+CM Radio del Alambre de Cobre: 2.00 mm (Diametro: 4.00 mm)
+CM Unidades NEC: Metros (m)
+CE
+GW  1 45  0.000000  0.000000  0.000000  0.000000  0.000000  0.128700  0.00200
+GE 0
+LD 5 0 0 0 5.80e+07
+EX 0 1 1 0 1.0 0.0
+FR 0 1 0 0 2440.00 0.0
+RP 0 37 73 1000 0.0 0.0 5.0 5.0
+FR 0 1 0 0 5500.00 0.0
+RP 0 37 73 1000 0.0 0.0 5.0 5.0
+EN
